@@ -7,6 +7,7 @@ import { QuickStats } from "@/components/QuickStats";
 import { ResultsTable } from "@/components/ResultsTable";
 import { ControlBar } from "@/components/ControlBar";
 import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/contexts/AuthContext";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Skeleton } from "@/components/ui/skeleton";
 import { AlertCircle } from "lucide-react";
@@ -14,6 +15,7 @@ import type { PhoneCheck, Statistics, WSMessage } from "@shared/schema";
 
 export default function HomePage() {
   const { toast } = useToast();
+  const { token } = useAuth();
 
   // WebSocket state
   const wsRef = useRef<WebSocket | null>(null);
@@ -45,8 +47,10 @@ export default function HomePage() {
     checking: 0,
   });
 
-  // Connect to WebSocket
+  // Connect to WebSocket with authentication
   useEffect(() => {
+    if (!token) return;
+
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${protocol}//${window.location.host}/ws`;
 
@@ -54,9 +58,13 @@ export default function HomePage() {
     wsRef.current = ws;
 
     ws.onopen = () => {
-      setIsConnected(true);
-      setWsError(null);
-      console.log("WebSocket connected");
+      console.log("WebSocket connected, authenticating...");
+
+      // Send authentication message
+      ws.send(JSON.stringify({
+        type: "authenticate",
+        token: token
+      }));
     };
 
     ws.onmessage = (event) => {
@@ -87,7 +95,7 @@ export default function HomePage() {
     return () => {
       ws.close();
     };
-  }, [toast]);
+  }, [token, toast]);
 
   const handleWSMessage = (message: WSMessage) => {
     switch (message.type) {
@@ -95,12 +103,14 @@ export default function HomePage() {
         setQrCode(message.qrCode);
         setIsAuthenticated(false);
         setAuthLoading(false);
+        setIsConnected(true); // WebSocket authenticated successfully
         break;
 
       case "authenticated":
         setIsAuthenticated(true);
         setQrCode(null);
         setAuthLoading(false);
+        setIsConnected(true);
         setAccountInfo({
           name: message.accountName,
           number: message.accountNumber,
@@ -233,7 +243,6 @@ export default function HomePage() {
 
   const handlePauseResume = () => {
     setIsPaused(!isPaused);
-    // TODO: Implement actual pause/resume logic with backend
     toast({
       title: isPaused ? "Resumed" : "Paused",
       description: isPaused ? "Checking resumed" : "Checking paused",
@@ -269,19 +278,51 @@ export default function HomePage() {
       .join("\n");
 
     try {
-      // Copy to clipboard
       await navigator.clipboard.writeText(resultText);
-
       toast({
         title: "Copied!",
         description: `${results.length} results copied to clipboard`,
       });
     } catch (error) {
-      // Fallback if clipboard API fails
       console.error("Failed to copy:", error);
       toast({
         title: "Copy Failed",
         description: "Please try again or use a modern browser",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleClearSession = async () => {
+    try {
+      const res = await fetch("/api/whatsapp/session", {
+        method: "DELETE",
+        credentials: "include",
+      });
+
+      if (!res.ok) {
+        throw new Error("Failed to clear session");
+      }
+
+      // Reset WhatsApp state
+      setIsAuthenticated(false);
+      setQrCode(null);
+      setAccountInfo(undefined);
+      setAuthLoading(true);
+
+      // Reconnect WebSocket to trigger new QR
+      if (wsRef.current) {
+        wsRef.current.close();
+      }
+
+      toast({
+        title: "Session Cleared",
+        description: "WhatsApp session has been cleared. Please scan QR again.",
+      });
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: "Failed to clear session",
         variant: "destructive",
       });
     }
@@ -293,12 +334,12 @@ export default function HomePage() {
         isConnected={isConnected}
         isAuthenticated={isAuthenticated}
         accountInfo={accountInfo}
+        onClearSession={handleClearSession}
       />
 
       <QRAuthModal open={!isAuthenticated && qrCode !== null} qrCode={qrCode} />
 
       <main className="container mx-auto px-4 md:px-6 py-6 md:py-8 max-w-7xl">
-        {/* Connection Error Alert */}
         {wsError && (
           <Alert variant="destructive" className="mb-6">
             <AlertCircle className="h-4 w-4" />
@@ -306,7 +347,6 @@ export default function HomePage() {
           </Alert>
         )}
 
-        {/* Authentication Loading State */}
         {authLoading && isConnected && (
           <div className="mb-6">
             <Alert>
@@ -318,7 +358,6 @@ export default function HomePage() {
           </div>
         )}
 
-        {/* Not Authenticated Warning */}
         {!isAuthenticated && !authLoading && isConnected && !qrCode && (
           <Alert className="mb-6">
             <AlertCircle className="h-4 w-4" />
@@ -329,9 +368,7 @@ export default function HomePage() {
           </Alert>
         )}
 
-        {/* Three Column Layout */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
-          {/* Left Panel - Upload Interface */}
           <div className="lg:col-span-1">
             <UploadInterface
               numbers={numbers}
@@ -342,7 +379,6 @@ export default function HomePage() {
             />
           </div>
 
-          {/* Center Panel - Checking Progress */}
           <div className="lg:col-span-1">
             <CheckingProgress
               currentNumber={currentNumber}
@@ -352,7 +388,6 @@ export default function HomePage() {
             />
           </div>
 
-          {/* Right Panel - Quick Stats */}
           <div className="lg:col-span-1">
             <QuickStats
               stats={stats}
@@ -362,7 +397,6 @@ export default function HomePage() {
           </div>
         </div>
 
-        {/* Control Bar (appears when checking is active) */}
         {isChecking && (
           <div className="mb-8">
             <ControlBar
@@ -375,14 +409,12 @@ export default function HomePage() {
           </div>
         )}
 
-        {/* Results Table Section */}
         {results.length > 0 && (
           <div className="w-full">
             <ResultsTable results={results} />
           </div>
         )}
 
-        {/* Empty State */}
         {results.length === 0 && !isChecking && isAuthenticated && (
           <div className="text-center py-16 text-muted-foreground">
             <div className="max-w-md mx-auto space-y-4">
